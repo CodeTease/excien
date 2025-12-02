@@ -1,5 +1,5 @@
-/* kernel.c - Excien Kernel v0.2.1
-   Features: VGA Driver, Keyboard Polling, Shell with ECHO support
+/* kernel.c - Excien Kernel v0.3.0 (CodeTease Edition)
+   Features: VGA Driver, Keyboard Polling, Modular Shell, Panic Mode
 */
 
 #include <stddef.h>
@@ -26,7 +26,6 @@ size_t strlen(const char* str)
     return len;
 }
 
-/* Compare two strings completely */
 int strcmp(const char* s1, const char* s2) {
     while (*s1 && (*s1 == *s2)) {
         s1++;
@@ -35,7 +34,6 @@ int strcmp(const char* s1, const char* s2) {
     return *(const unsigned char*)s1 - *(const unsigned char*)s2;
 }
 
-/* Compare first n characters of two strings (Needed for command arguments) */
 int strncmp(const char* s1, const char* s2, size_t n) {
     while (n && *s1 && (*s1 == *s2)) {
         ++s1;
@@ -58,10 +56,21 @@ uint8_t terminal_color;
 
 enum vga_color {
     VGA_COLOR_BLACK = 0,
+    VGA_COLOR_BLUE = 1,
     VGA_COLOR_GREEN = 2,
+    VGA_COLOR_CYAN = 3,
+    VGA_COLOR_RED = 4,
+    VGA_COLOR_MAGENTA = 5,
+    VGA_COLOR_BROWN = 6,
     VGA_COLOR_LIGHT_GREY = 7,
-    VGA_COLOR_WHITE = 15,
+    VGA_COLOR_DARK_GREY = 8,
+    VGA_COLOR_LIGHT_BLUE = 9,
+    VGA_COLOR_LIGHT_GREEN = 10,
     VGA_COLOR_LIGHT_CYAN = 11,
+    VGA_COLOR_LIGHT_RED = 12,
+    VGA_COLOR_LIGHT_MAGENTA = 13,
+    VGA_COLOR_LIGHT_BROWN = 14,
+    VGA_COLOR_WHITE = 15,
 };
 
 static inline uint8_t vga_entry_color(enum vga_color fg, enum vga_color bg) 
@@ -72,6 +81,10 @@ static inline uint8_t vga_entry_color(enum vga_color fg, enum vga_color bg)
 static inline uint16_t vga_entry(unsigned char uc, uint8_t color) 
 {
     return (uint16_t) uc | (uint16_t) color << 8;
+}
+
+void terminal_set_color(uint8_t color) {
+    terminal_color = color;
 }
 
 void terminal_initialize(void) 
@@ -137,6 +150,40 @@ void terminal_writestring(const char* data)
         terminal_putchar(data[i]);
 }
 
+void terminal_write_color(const char* data, enum vga_color fg) {
+    uint8_t old_color = terminal_color;
+    terminal_set_color(vga_entry_color(fg, VGA_COLOR_BLACK));
+    terminal_writestring(data);
+    terminal_set_color(old_color);
+}
+
+/* --- KERNEL PANIC --- */
+
+void panic(const char* message) {
+    terminal_set_color(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_RED));
+    // Clear screen specifically for panic manually to fill background
+    for (size_t y = 0; y < VGA_HEIGHT; y++) {
+        for (size_t x = 0; x < VGA_WIDTH; x++) {
+            vga_buffer[y * VGA_WIDTH + x] = vga_entry(' ', terminal_color);
+        }
+    }
+    terminal_row = 0; 
+    terminal_column = 0;
+    
+    terminal_writestring("\n  !!! EXCIEN KERNEL PANIC !!!\n\n");
+    terminal_writestring("  A fatal error has occurred and Excien has been shut down.\n");
+    terminal_writestring("  Error: ");
+    terminal_writestring(message);
+    terminal_writestring("\n\n  Please restart your computer manually.");
+    terminal_writestring("\n  (Or blame the developer at CodeTease)");
+
+    // Halt CPU
+    asm volatile("cli");
+    for (;;) {
+        asm volatile("hlt");
+    }
+}
+
 /* --- KEYBOARD DRIVER (POLLING) --- */
 
 char kbd_US [128] = {
@@ -154,6 +201,83 @@ char get_scancode()
     return inb(0x60);
 }
 
+/* --- COMMAND SYSTEM --- */
+
+typedef void (*command_func_t)(const char* args);
+
+typedef struct {
+    const char* name;
+    command_func_t func;
+    const char* help;
+} command_t;
+
+// Forward declarations
+void cmd_echo(const char* args);
+void cmd_help(const char* args);
+void cmd_about(const char* args);
+void cmd_clear(const char* args);
+void cmd_panic(const char* args);
+void cmd_ping(const char* args);
+void cmd_shutdown(const char* args);
+
+command_t commands[] = {
+    {"echo", cmd_echo, "Prints text to console. Usage: echo <text>"},
+    {"help", cmd_help, "Shows this help message."},
+    {"about", cmd_about, "Information about Excien."},
+    {"clear", cmd_clear, "Clears the terminal."},
+    {"codetease", cmd_about, "Alias for about."},
+    {"panic", cmd_panic, "Triggers a kernel panic (BSOD test)."},
+    {"ping", cmd_ping, "Pings an IP address (Network test)."},
+    {0, 0, 0} // Null terminator
+};
+
+void cmd_echo(const char* args) {
+    terminal_writestring(args);
+    terminal_writestring("\n");
+}
+
+void cmd_help(const char* args) {
+    (void)args;
+    terminal_writestring("Available commands:\n");
+    for (int i = 0; commands[i].name != 0; i++) {
+        terminal_write_color("  ", VGA_COLOR_DARK_GREY);
+        terminal_write_color(commands[i].name, VGA_COLOR_LIGHT_CYAN);
+        terminal_writestring(": ");
+        terminal_writestring(commands[i].help);
+        terminal_writestring("\n");
+    }
+}
+
+void cmd_about(const char* args) {
+    (void)args;
+    terminal_write_color("Excien Kernel v0.3.0\n", VGA_COLOR_LIGHT_GREEN);
+    terminal_writestring("Built by ");
+    terminal_write_color("Teaserverse Platform, Inc.\n", VGA_COLOR_LIGHT_MAGENTA);
+    terminal_writestring("CodeTease: Always fun. Always useless.\n");
+}
+
+void cmd_clear(const char* args) {
+    (void)args;
+    terminal_initialize();
+    terminal_writestring("Excien Shell [v0.3.0]\nuser@excien:~$ ");
+}
+
+void cmd_panic(const char* args) {
+    (void)args;
+    panic("User requested fatal error via shell.");
+}
+
+void cmd_ping(const char* args) {
+    if (strlen(args) == 0) {
+        terminal_writestring("Usage: ping <ip>\n");
+        return;
+    }
+    terminal_writestring("Pinging ");
+    terminal_writestring(args);
+    terminal_writestring("...\n");
+    terminal_write_color("Error: Network Unreachable.\n", VGA_COLOR_LIGHT_RED);
+}
+
 /* --- SHELL --- */
 
 char input_buffer[256];
@@ -164,48 +288,41 @@ void execute_command()
     terminal_writestring("\n");
     input_buffer[buffer_index] = 0; 
 
-    /* Handle empty input */
     if (strlen(input_buffer) == 0) {
-        // Do nothing, just print prompt
-    }
-    /* Command: ECHO */
-    else if (strncmp(input_buffer, "echo ", 5) == 0) {
-        // Print everything after "echo "
-        terminal_writestring(input_buffer + 5);
-        terminal_writestring("\n");
-    }
-    else if (strcmp(input_buffer, "echo") == 0) {
-        // Print empty line
-        terminal_writestring("\n");
-    }
-    /* Command: HELP */
-    else if (strcmp(input_buffer, "help") == 0) {
-        terminal_writestring("Available commands: echo, help, about, clear, codetease");
-    } 
-    /* Command: ABOUT */
-    else if (strcmp(input_buffer, "about") == 0) {
-        terminal_writestring("Excien Kernel v0.2.1. Built by Teaserverse Platform, Inc.");
-    }
-    /* Command: CODETEASE */
-    else if (strcmp(input_buffer, "codetease") == 0) {
-        terminal_writestring("CodeTease: Always fun. Always useless.");
-    }
-    /* Command: CLEAR */
-    else if (strcmp(input_buffer, "clear") == 0) {
-        terminal_initialize();
-        terminal_writestring("Excien Shell [v0.2.1]\n");
-        buffer_index = 0;
         terminal_writestring("user@excien:~$ ");
         return;
     }
-    else {
-        terminal_writestring("Unknown command: ");
+
+    int found = 0;
+    for (int i = 0; commands[i].name != 0; i++) {
+        size_t cmd_len = strlen(commands[i].name);
+        
+        // Check if input starts with command name
+        if (strncmp(input_buffer, commands[i].name, cmd_len) == 0) {
+            // Ensure exact match or followed by space
+            if (input_buffer[cmd_len] == 0 || input_buffer[cmd_len] == ' ') {
+                const char* args = "";
+                if (input_buffer[cmd_len] == ' ') {
+                    args = input_buffer + cmd_len + 1;
+                }
+                commands[i].func(args);
+                found = 1;
+                break;
+            }
+        }
+    }
+
+    if (!found) {
+        terminal_write_color("Unknown command: ", VGA_COLOR_LIGHT_RED);
         terminal_writestring(input_buffer);
         terminal_writestring("\n");
     }
 
+    // Don't reprint prompt if we cleared the screen inside the command
+    if (strcmp(input_buffer, "clear") != 0) {
+        terminal_writestring("user@excien:~$ ");
+    }
     buffer_index = 0;
-    terminal_writestring("user@excien:~$ ");
 }
 
 void shell_loop() 
@@ -236,17 +353,24 @@ void shell_loop()
     }
 }
 
+void print_splash() {
+    terminal_set_color(vga_entry_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK));
+    terminal_writestring("\n  _____           _            \n");
+    terminal_writestring(" | ____|_  ___ __(_) ___ _ __  \n");
+    terminal_writestring(" |  _| \\ \\/ / '__| |/ _ \\ '_ \\ \n");
+    terminal_writestring(" | |___ >  <| |  | |  __/ | | |\n");
+    terminal_writestring(" |_____/_/\\_\\_|  |_|\\___|_| |_|\n");
+    terminal_writestring("\n");
+    terminal_set_color(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK));
+    terminal_writestring(" Excien Kernel v0.3.0 - ");
+    terminal_write_color("PRE-RELEASE\n", VGA_COLOR_LIGHT_RED);
+    terminal_writestring(" Copyright (c) 2025 CodeTease.\n");
+    terminal_writestring("---------------------------------------\n\n");
+}
+
 void __attribute__((__used__)) kernel_main(void) 
 {
     terminal_initialize();
-    
-    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    terminal_writestring("Excien Kernel v0.2.1 [Interactive Mode]\n");
-    terminal_writestring("Booting... OK\n");
-    terminal_writestring("Shell: Loaded... OK\n");
-    terminal_writestring("Now with 100% more ECHO!\n");
-    terminal_writestring("---------------------------------------\n\n");
-    
-    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    print_splash();
     shell_loop();
 }

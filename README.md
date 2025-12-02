@@ -1,8 +1,10 @@
-# Excien Kernel v0.2.1 (Pre-release)
+# Excien Kernel v0.3.0 (Pre-release)
 
 **Status:** Unreleased (but version bumped anyway).
 
 Excien is a toy kernel developed by CodeTease. It demonstrates basic VGA output and keyboard interaction in a 32-bit environment.
+
+> Bonus: If you think the ASCII art showing "Exrien" instead of "Excien". You're not alone!
 
 ## Features
 
