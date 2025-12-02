@@ -2,7 +2,7 @@
 
 **Status:** Unreleased (but version bumped anyway).
 
-Excien is a toy kernel developed by Teaserverse Platform, Inc. It demonstrates basic VGA output and keyboard interaction in a 32-bit environment.
+Excien is a toy kernel developed by CodeTease. It demonstrates basic VGA output and keyboard interaction in a 32-bit environment.
 
 ## Features
 
