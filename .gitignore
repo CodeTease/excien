@@ -3,3 +3,4 @@
 
 # Internal
 *.vegh
+.veghcache
