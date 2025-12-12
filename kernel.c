@@ -1,22 +1,48 @@
-/* kernel.c - Excien Kernel v0.3.0 (CodeTease Edition)
-   Features: VGA Driver, Keyboard Polling, Modular Shell, Panic Mode
-*/
+/* kernel.c - Excien Kernel v0.3.0 (CodeTease Edition) */
 
-#include <stddef.h>
-#include <stdint.h>
+#include "kernel.h"
+#include "cpu.h"
 
-/* --- LOW LEVEL HELPERS --- */
+/* --- MEMORY MANAGEMENT (Simple Bump Allocator) --- */
+// 10MB mark
+static uint32_t free_mem_addr = 0x1000000; 
 
-static inline uint8_t inb(uint16_t port) 
-{
-    uint8_t ret;
-    asm volatile ( "inb %1, %0" : "=a"(ret) : "Nd"(port) );
-    return ret;
+void* kmalloc(size_t size) {
+    // 4-byte align
+    if (free_mem_addr & 0x3) { 
+        free_mem_addr &= 0xFFFFFFFC;
+        free_mem_addr += 4;
+    }
+    void* ptr = (void*)free_mem_addr;
+    free_mem_addr += size;
+    return ptr;
 }
 
-static inline void outb(uint16_t port, uint8_t val) 
-{
-    asm volatile ( "outb %0, %1" : : "a"(val), "Nd"(port) );
+void kfree(void* ptr) {
+    (void)ptr;
+    // We don't free in bump allocator
+}
+
+void* memcpy(void* dest, const void* src, size_t n) {
+    char* d = (char*)dest;
+    const char* s = (const char*)src;
+    while(n--) *d++ = *s++;
+    return dest;
+}
+
+void* memset(void* s, int c, size_t n) {
+    unsigned char* p = (unsigned char*)s;
+    while(n--) *p++ = (unsigned char)c;
+    return s;
+}
+
+char* strcpy(char* dest, const char* src) {
+    char* saved = dest;
+    while (*src) {
+        *dest++ = *src++;
+    }
+    *dest = 0;
+    return saved;
 }
 
 size_t strlen(const char* str) 
@@ -54,25 +80,6 @@ size_t terminal_row;
 size_t terminal_column;
 uint8_t terminal_color;
 
-enum vga_color {
-    VGA_COLOR_BLACK = 0,
-    VGA_COLOR_BLUE = 1,
-    VGA_COLOR_GREEN = 2,
-    VGA_COLOR_CYAN = 3,
-    VGA_COLOR_RED = 4,
-    VGA_COLOR_MAGENTA = 5,
-    VGA_COLOR_BROWN = 6,
-    VGA_COLOR_LIGHT_GREY = 7,
-    VGA_COLOR_DARK_GREY = 8,
-    VGA_COLOR_LIGHT_BLUE = 9,
-    VGA_COLOR_LIGHT_GREEN = 10,
-    VGA_COLOR_LIGHT_CYAN = 11,
-    VGA_COLOR_LIGHT_RED = 12,
-    VGA_COLOR_LIGHT_MAGENTA = 13,
-    VGA_COLOR_LIGHT_BROWN = 14,
-    VGA_COLOR_WHITE = 15,
-};
-
 static inline uint8_t vga_entry_color(enum vga_color fg, enum vga_color bg) 
 {
     return fg | bg << 4;
@@ -97,6 +104,20 @@ void terminal_initialize(void)
             vga_buffer[y * VGA_WIDTH + x] = vga_entry(' ', terminal_color);
         }
     }
+    
+    // Move cursor to 0,0
+    outb(0x3D4, 0x0F);
+    outb(0x3D5, 0);
+    outb(0x3D4, 0x0E);
+    outb(0x3D5, 0);
+}
+
+void terminal_update_cursor() {
+    uint16_t pos = terminal_row * VGA_WIDTH + terminal_column;
+    outb(0x3D4, 0x0F);
+    outb(0x3D5, (uint8_t)(pos & 0xFF));
+    outb(0x3D4, 0x0E);
+    outb(0x3D5, (uint8_t)((pos >> 8) & 0xFF));
 }
 
 void terminal_scroll(void)
@@ -124,6 +145,7 @@ void terminal_putchar(char c)
         if (++terminal_row == VGA_HEIGHT) {
             terminal_scroll();
         }
+        terminal_update_cursor();
         return;
     }
     
@@ -131,7 +153,12 @@ void terminal_putchar(char c)
          if (terminal_column > 0) {
             terminal_column--;
             terminal_putentryat(' ', terminal_color, terminal_column, terminal_row);
+         } else if (terminal_row > 0) { // Backspace to previous line if needed (optional)
+            terminal_row--;
+            terminal_column = VGA_WIDTH - 1;
+            terminal_putentryat(' ', terminal_color, terminal_column, terminal_row);
          }
+         terminal_update_cursor();
          return;
     }
 
@@ -142,6 +169,7 @@ void terminal_putchar(char c)
             terminal_scroll();
         }
     }
+    terminal_update_cursor();
 }
 
 void terminal_writestring(const char* data) 
@@ -159,9 +187,24 @@ void terminal_write_color(const char* data, enum vga_color fg) {
 
 /* --- KERNEL PANIC --- */
 
+// Helper to print hex
+void print_hex(uint32_t n) {
+    terminal_writestring("0x");
+    char hex_chars[] = "0123456789ABCDEF";
+    for (int i = 28; i >= 0; i -= 4) {
+        terminal_putchar(hex_chars[(n >> i) & 0xF]);
+    }
+}
+
 void panic(const char* message) {
+    panic_with_regs(message, 0);
+}
+
+void panic_with_regs(const char* message, registers_t* regs) {
+    asm volatile("cli");
+    
     terminal_set_color(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_RED));
-    // Clear screen specifically for panic manually to fill background
+    // Clear screen specifically for panic manually
     for (size_t y = 0; y < VGA_HEIGHT; y++) {
         for (size_t x = 0; x < VGA_WIDTH; x++) {
             vga_buffer[y * VGA_WIDTH + x] = vga_entry(' ', terminal_color);
@@ -169,22 +212,41 @@ void panic(const char* message) {
     }
     terminal_row = 0; 
     terminal_column = 0;
+    terminal_update_cursor();
     
     terminal_writestring("\n  !!! EXCIEN KERNEL PANIC !!!\n\n");
-    terminal_writestring("  A fatal error has occurred and Excien has been shut down.\n");
     terminal_writestring("  Error: ");
     terminal_writestring(message);
-    terminal_writestring("\n\n  Please restart your computer manually.");
-    terminal_writestring("\n  (Or blame the developer at CodeTease)");
+    terminal_writestring("\n");
 
-    // Halt CPU
-    asm volatile("cli");
+    if (regs) {
+        terminal_writestring("\n  EAX: "); print_hex(regs->eax);
+        terminal_writestring("  EBX: "); print_hex(regs->ebx);
+        terminal_writestring("  ECX: "); print_hex(regs->ecx);
+        terminal_writestring("  EDX: "); print_hex(regs->edx);
+        terminal_writestring("\n  ESI: "); print_hex(regs->esi);
+        terminal_writestring("  EDI: "); print_hex(regs->edi);
+        terminal_writestring("  EBP: "); print_hex(regs->ebp);
+        terminal_writestring("  ESP: "); print_hex(regs->esp);
+        terminal_writestring("\n  EIP: "); print_hex(regs->eip);
+        terminal_writestring("  CS:  "); print_hex(regs->cs);
+        terminal_writestring("  FLG: "); print_hex(regs->eflags);
+        terminal_writestring("\n");
+        if (regs->int_no <= 32) {
+             terminal_writestring("  INT: "); print_hex(regs->int_no);
+             terminal_writestring("  ERR: "); print_hex(regs->err_code);
+             terminal_writestring("\n");
+        }
+    }
+
+    terminal_writestring("\n  System halted.\n");
+
     for (;;) {
         asm volatile("hlt");
     }
 }
 
-/* --- KEYBOARD DRIVER (POLLING) --- */
+/* --- KEYBOARD DRIVER (INTERRUPT BASED) --- */
 
 char kbd_US [128] = {
     0,  27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',   
@@ -194,11 +256,48 @@ char kbd_US [128] = {
   '*', 0, ' ',
 };
 
-char get_scancode() 
-{
-    uint8_t c = 0;
-    do { c = inb(0x64); } while((c & 1) == 0);
-    return inb(0x60);
+// Keyboard Buffer
+#define KB_BUFFER_SIZE 256
+char kb_buffer[KB_BUFFER_SIZE];
+volatile int kb_read_ptr = 0;
+volatile int kb_write_ptr = 0;
+
+void keyboard_callback(registers_t* regs) {
+    (void)regs;
+    uint8_t scancode = inb(0x60);
+    
+    // Ignore key release for now
+    if (scancode & 0x80) return;
+
+    // Up arrow: 0xE0 0x48 (Handle extended codes later properly, for now just simple scancodes)
+    // Actually, scancodes are trickier.
+    // Standard arrows: Up=0x48, Left=0x4B, Right=0x4D, Down=0x50 (Wait, these are keypad if NumLock off, or extended)
+    // Extended keys send E0 first. 
+    
+    // For simplicity, let's just store scancode if it's special, or ASCII if it's normal.
+    // Or just store scancode and let shell handle it? 
+    // Shell needs ASCII mostly.
+    
+    // Let's assume standard set 1.
+    
+    int next_write = (kb_write_ptr + 1) % KB_BUFFER_SIZE;
+    if (next_write != kb_read_ptr) {
+        kb_buffer[kb_write_ptr] = (char)scancode; // Store raw scancode for now to handle arrows
+        kb_write_ptr = next_write;
+    }
+}
+
+void keyboard_install() {
+    register_interrupt_handler(33, keyboard_callback);
+}
+
+// Non-blocking char read, returns 0 if no key
+char keyboard_getchar() {
+    if (kb_read_ptr == kb_write_ptr) return 0;
+    
+    char scancode = kb_buffer[kb_read_ptr];
+    kb_read_ptr = (kb_read_ptr + 1) % KB_BUFFER_SIZE;
+    return scancode;
 }
 
 /* --- COMMAND SYSTEM --- */
@@ -218,7 +317,8 @@ void cmd_about(const char* args);
 void cmd_clear(const char* args);
 void cmd_panic(const char* args);
 void cmd_ping(const char* args);
-void cmd_shutdown(const char* args);
+void cmd_ls(const char* args);
+void cmd_cat(const char* args);
 
 command_t commands[] = {
     {"echo", cmd_echo, "Prints text to console. Usage: echo <text>"},
@@ -228,7 +328,9 @@ command_t commands[] = {
     {"codetease", cmd_about, "Alias for about."},
     {"panic", cmd_panic, "Triggers a kernel panic (BSOD test)."},
     {"ping", cmd_ping, "Pings an IP address (Network test)."},
-    {0, 0, 0} // Null terminator
+    {"ls", cmd_ls, "List loaded modules (files)."},
+    {"cat", cmd_cat, "Print module content. Usage: cat <name>"},
+    {0, 0, 0} 
 };
 
 void cmd_echo(const char* args) {
@@ -250,7 +352,7 @@ void cmd_help(const char* args) {
 
 void cmd_about(const char* args) {
     (void)args;
-    terminal_write_color("Excien Kernel v0.3.0\n", VGA_COLOR_LIGHT_GREEN);
+    terminal_write_color("Excien Kernel v0.4.0\n", VGA_COLOR_LIGHT_GREEN);
     terminal_writestring("Built by ");
     terminal_write_color("Teaserverse Platform, Inc.\n", VGA_COLOR_LIGHT_MAGENTA);
     terminal_writestring("CodeTease: Always fun. Always useless.\n");
@@ -259,11 +361,13 @@ void cmd_about(const char* args) {
 void cmd_clear(const char* args) {
     (void)args;
     terminal_initialize();
-    terminal_writestring("Excien Shell [v0.3.0]\nuser@excien:~$ ");
+    terminal_writestring("Excien Shell [v0.4.0]\nuser@excien:~$ ");
 }
 
 void cmd_panic(const char* args) {
     (void)args;
+    // We can simulate an exception (e.g., div by zero) or call panic directly
+    // Let's call panic directly with fake regs if we want, but simple panic is fine
     panic("User requested fatal error via shell.");
 }
 
@@ -275,10 +379,106 @@ void cmd_ping(const char* args) {
     terminal_writestring("Pinging ");
     terminal_writestring(args);
     terminal_writestring("...\n");
+    
+    sleep(1000); 
+    
     terminal_write_color("Error: Network Unreachable.\n", VGA_COLOR_LIGHT_RED);
 }
 
+/* --- INITRD / MODULES --- */
+typedef struct {
+    uint32_t mod_start;
+    uint32_t mod_end;
+    uint32_t string;
+    uint32_t reserved;
+} multiboot_module_t;
+
+typedef struct {
+    uint32_t flags;
+    uint32_t mem_lower;
+    uint32_t mem_upper;
+    uint32_t boot_device;
+    uint32_t cmdline;
+    uint32_t mods_count;
+    uint32_t mods_addr;
+    // ... we don't need the rest for now
+} multiboot_info_t;
+
+multiboot_info_t* mb_info = 0;
+
+void cmd_ls(const char* args) {
+    (void)args;
+    if (!mb_info || !(mb_info->flags & (1<<3))) {
+         terminal_writestring("No modules loaded.\n");
+         return;
+    }
+    
+    multiboot_module_t* modules = (multiboot_module_t*)mb_info->mods_addr;
+    for (uint32_t i = 0; i < mb_info->mods_count; i++) {
+        terminal_writestring((const char*)modules[i].string);
+        terminal_writestring(" (");
+        // Print size
+        // We lack printf with %d, so skip size for now or implement itoa
+        terminal_writestring("bytes)\n");
+    }
+}
+
+void cmd_cat(const char* args) {
+    if (!mb_info || !(mb_info->flags & (1<<3))) {
+         terminal_writestring("No modules loaded.\n");
+         return;
+    }
+    
+    if (strlen(args) == 0) {
+        terminal_writestring("Usage: cat <filename>\n");
+        return;
+    }
+
+    multiboot_module_t* modules = (multiboot_module_t*)mb_info->mods_addr;
+    for (uint32_t i = 0; i < mb_info->mods_count; i++) {
+        if (strcmp((const char*)modules[i].string, args) == 0) {
+            char* start = (char*)modules[i].mod_start;
+            char* end = (char*)modules[i].mod_end;
+            
+            for (char* p = start; p < end; p++) {
+                terminal_putchar(*p);
+            }
+            terminal_writestring("\n");
+            return;
+        }
+    }
+    terminal_writestring("File not found.\n");
+}
+
 /* --- SHELL --- */
+
+// History
+#define HISTORY_MAX 10
+char* history[HISTORY_MAX];
+int history_count = 0;
+int history_view_index = -1; // -1 means currently typing new command
+
+void history_add(const char* cmd) {
+    if (history_count < HISTORY_MAX) {
+        history[history_count] = kmalloc(strlen(cmd) + 1);
+        strcpy(history[history_count], cmd);
+        history_count++;
+    } else {
+        // Shift, but we are using bump allocator so we can't free.
+        // This is a "leak" but per requirements "reset machine to clear".
+        // To be nicer, we could reuse slots, but let's just shift pointers.
+        // Ideally we would recycle the string buffer if size fits, but simple is ok.
+        
+        // Actually, if we just shift pointers, the old string remains in heap (wasted).
+        // Since we don't have free, we just abandon it.
+        
+        for (int i = 0; i < HISTORY_MAX - 1; i++) {
+            history[i] = history[i+1];
+        }
+        history[HISTORY_MAX-1] = kmalloc(strlen(cmd) + 1);
+        strcpy(history[HISTORY_MAX-1], cmd);
+    }
+}
 
 char input_buffer[256];
 int buffer_index = 0;
@@ -292,14 +492,18 @@ void execute_command()
         terminal_writestring("user@excien:~$ ");
         return;
     }
+    
+    // Add to history
+    if (history_count == 0 || strcmp(history[history_count-1], input_buffer) != 0) {
+        history_add(input_buffer);
+    }
+    history_view_index = -1;
 
     int found = 0;
     for (int i = 0; commands[i].name != 0; i++) {
         size_t cmd_len = strlen(commands[i].name);
         
-        // Check if input starts with command name
         if (strncmp(input_buffer, commands[i].name, cmd_len) == 0) {
-            // Ensure exact match or followed by space
             if (input_buffer[cmd_len] == 0 || input_buffer[cmd_len] == ' ') {
                 const char* args = "";
                 if (input_buffer[cmd_len] == ' ') {
@@ -318,21 +522,124 @@ void execute_command()
         terminal_writestring("\n");
     }
 
-    // Don't reprint prompt if we cleared the screen inside the command
     if (strcmp(input_buffer, "clear") != 0) {
         terminal_writestring("user@excien:~$ ");
     }
     buffer_index = 0;
 }
 
+void shell_handle_tab() {
+    // Simple tab completion
+    // Check commands matching current buffer
+    if (buffer_index == 0) return;
+    
+    input_buffer[buffer_index] = 0;
+    
+    int match_idx = -1;
+    int matches = 0;
+    
+    for (int i = 0; commands[i].name != 0; i++) {
+        if (strncmp(input_buffer, commands[i].name, buffer_index) == 0) {
+            match_idx = i;
+            matches++;
+        }
+    }
+    
+    if (matches == 1) {
+        // Auto complete
+        const char* name = commands[match_idx].name;
+        // Print remaining chars
+        for (int i = buffer_index; name[i] != 0; i++) {
+            input_buffer[buffer_index++] = name[i];
+            terminal_putchar(name[i]);
+        }
+        // Add space
+        input_buffer[buffer_index++] = ' ';
+        terminal_putchar(' ');
+    } else if (matches > 1) {
+        // Show possibilities?
+        // For now, do nothing or beep (no beep implemented)
+    }
+}
+
+void shell_load_history(int index) {
+    // Clear current line
+    while(buffer_index > 0) {
+        terminal_putchar('\b');
+        buffer_index--;
+    }
+    
+    if (index >= 0 && index < history_count) {
+        const char* cmd = history[index];
+        strcpy(input_buffer, cmd);
+        buffer_index = strlen(cmd);
+        terminal_writestring(input_buffer);
+    }
+}
+
 void shell_loop() 
 {
     terminal_writestring("user@excien:~$ ");
+    
+    // We need to track extended keys.
+    // 0xE0 means extended.
+    
+    int state = 0; // 0=normal, 1=seen E0
+    
     while(1) {
-        uint8_t scancode = get_scancode();
-        if (scancode & 0x80) continue; 
-
-        char ascii = kbd_US[scancode];
+        // Polling loop but using our new keyboard_getchar which reads from interrupt buffer
+        char scancode = keyboard_getchar();
+        if (scancode == 0) {
+             asm volatile("hlt"); // Save power
+             continue;
+        }
+        
+        // Handle E0
+        if ((uint8_t)scancode == 0xE0) {
+            state = 1;
+            continue;
+        }
+        
+        if (state == 1) {
+            // Extended key
+            // Up arrow: 0x48 (if E0 prefix)
+            // Down arrow: 0x50 (if E0 prefix)
+            // Left: 0x4B
+            // Right: 0x4D
+            state = 0;
+            
+            if ((uint8_t)scancode == 0x48) { // UP
+                if (history_count > 0) {
+                    if (history_view_index == -1) history_view_index = history_count - 1;
+                    else if (history_view_index > 0) history_view_index--;
+                    shell_load_history(history_view_index);
+                }
+            }
+            else if ((uint8_t)scancode == 0x50) { // DOWN
+                 if (history_view_index != -1) {
+                    if (history_view_index < history_count - 1) {
+                        history_view_index++;
+                        shell_load_history(history_view_index);
+                    } else {
+                        // Restore empty
+                        history_view_index = -1;
+                        while(buffer_index > 0) {
+                            terminal_putchar('\b');
+                            buffer_index--;
+                        }
+                    }
+                 }
+            }
+            continue;
+        }
+        
+        // Normal key
+        // Map scancode to ASCII
+        char ascii = 0;
+        if ((uint8_t)scancode < 128) {
+            ascii = kbd_US[(uint8_t)scancode];
+        }
+        
         if (ascii > 0) {
             if (ascii == '\n') {
                 execute_command();
@@ -342,6 +649,9 @@ void shell_loop()
                     buffer_index--;
                     terminal_putchar('\b');
                 }
+            }
+            else if (ascii == '\t') {
+                shell_handle_tab();
             }
             else {
                 if (buffer_index < 255) {
@@ -362,15 +672,44 @@ void print_splash() {
     terminal_writestring(" |_____/_/\\_\\_|  |_|\\___|_| |_|\n");
     terminal_writestring("\n");
     terminal_set_color(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK));
-    terminal_writestring(" Excien Kernel v0.3.0 - ");
+    terminal_writestring(" Excien Kernel v0.4.0 - ");
     terminal_write_color("PRE-RELEASE\n", VGA_COLOR_LIGHT_RED);
     terminal_writestring(" Copyright (c) 2025 CodeTease.\n");
     terminal_writestring("---------------------------------------\n\n");
 }
 
-void __attribute__((__used__)) kernel_main(void) 
+void __attribute__((__used__)) kernel_main(uint32_t magic, uint32_t addr) 
 {
+    /* Initialize Hardware */
+    gdt_install();
+    idt_install();
+    isr_install();
+    irq_install();
+    
+    // Enable interrupts
+    asm volatile("sti");
+    
+    timer_install();
+    keyboard_install();
+    
     terminal_initialize();
+    
+    if (magic == 0x2BADB002) {
+        mb_info = (multiboot_info_t*)addr;
+    }
+    
     print_splash();
+    
+    // Check modules
+    if (mb_info && (mb_info->flags & (1<<3))) {
+        terminal_writestring("Modules loaded: ");
+        // We can print count manually since we don't have itoa
+        if (mb_info->mods_count > 0) {
+            terminal_writestring("Yes\n");
+        } else {
+             terminal_writestring("None\n");
+        }
+    }
+    
     shell_loop();
 }
