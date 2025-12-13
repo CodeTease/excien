@@ -1,7 +1,19 @@
-/* kernel.c - Excien Kernel v0.3.0 (CodeTease Edition) */
+/* kernel.c - Excien Kernel v0.4.0 (CodeTease Edition) */
 
 #include "kernel.h"
 #include "cpu.h"
+
+/* --- RANDOM NUMBER GENERATOR --- */
+static unsigned long int next_rand = 1;
+
+int rand(void) {
+    next_rand = next_rand * 1103515245 + 12345;
+    return (unsigned int)(next_rand / 65536) % 32768;
+}
+
+void srand(unsigned int seed) {
+    next_rand = seed;
+}
 
 /* --- MEMORY MANAGEMENT (Simple Bump Allocator) --- */
 // 10MB mark
@@ -319,6 +331,8 @@ void cmd_panic(const char* args);
 void cmd_ping(const char* args);
 void cmd_ls(const char* args);
 void cmd_cat(const char* args);
+void cmd_color(const char* args);
+void cmd_matrix(const char* args);
 
 command_t commands[] = {
     {"echo", cmd_echo, "Prints text to console. Usage: echo <text>"},
@@ -330,6 +344,8 @@ command_t commands[] = {
     {"ping", cmd_ping, "Pings an IP address (Network test)."},
     {"ls", cmd_ls, "List loaded modules (files)."},
     {"cat", cmd_cat, "Print module content. Usage: cat <name>"},
+    {"color", cmd_color, "Change terminal theme. Usage: color <matrix|bsod|default>"},
+    {"matrix", cmd_matrix, "Enter the Matrix."},
     {0, 0, 0} 
 };
 
@@ -380,9 +396,97 @@ void cmd_ping(const char* args) {
     terminal_writestring(args);
     terminal_writestring("...\n");
     
-    sleep(1000); 
+    // Simple busy wait since we don't have sleep()
+    for (volatile int i = 0; i < 10000000; i++);
     
     terminal_write_color("Error: Network Unreachable.\n", VGA_COLOR_LIGHT_RED);
+}
+
+void terminal_set_theme(enum vga_color fg, enum vga_color bg) {
+    uint8_t new_color = vga_entry_color(fg, bg);
+    terminal_set_color(new_color);
+    
+    for (size_t y = 0; y < VGA_HEIGHT; y++) {
+        for (size_t x = 0; x < VGA_WIDTH; x++) {
+            uint16_t entry = vga_buffer[y * VGA_WIDTH + x];
+            unsigned char c = entry & 0xFF;
+            vga_buffer[y * VGA_WIDTH + x] = vga_entry(c, new_color);
+        }
+    }
+}
+
+void cmd_color(const char* args) {
+    if (strcmp(args, "matrix") == 0) {
+        terminal_set_theme(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+        terminal_writestring("The Matrix has you...\n");
+    } else if (strcmp(args, "bsod") == 0) {
+        terminal_set_theme(VGA_COLOR_WHITE, VGA_COLOR_BLUE);
+        terminal_writestring("BSOD Theme activated. Don't panic.\n");
+    } else if (strcmp(args, "default") == 0) {
+        terminal_set_theme(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+        terminal_writestring("Default theme restored.\n");
+    } else {
+        terminal_writestring("Usage: color <matrix|bsod|default>\n");
+    }
+}
+
+void cmd_matrix(const char* args) {
+    (void)args;
+    // Clear screen first
+    for (size_t y = 0; y < VGA_HEIGHT; y++) {
+        for (size_t x = 0; x < VGA_WIDTH; x++) {
+            vga_buffer[y * VGA_WIDTH + x] = vga_entry(' ', vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
+        }
+    }
+    
+    int drops[80]; // VGA_WIDTH is 80
+    for (size_t i = 0; i < VGA_WIDTH; i++) drops[i] = -1;
+    
+    terminal_row = 0;
+    terminal_column = 0;
+    
+    while (1) {
+        // Check for exit
+        if (keyboard_getchar() != 0) break;
+        
+        // Update matrix
+        for (size_t x = 0; x < VGA_WIDTH; x++) {
+            if (drops[x] == -1) {
+                if (rand() % 40 == 0) { // Random start
+                    drops[x] = 0;
+                }
+            } else {
+                // Clear previous head trail (dimming effect could be done but hard with 16 colors)
+                // Just draw head
+                char c = 33 + (rand() % 94); // Printable ASCII
+                // Draw head bright green
+                terminal_putentryat(c, vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK), x, drops[x]);
+                
+                // Draw tail (darker green) one step above
+                if (drops[x] > 0) {
+                     char tail_c = (vga_buffer[(drops[x]-1) * VGA_WIDTH + x]) & 0xFF;
+                     terminal_putentryat(tail_c, vga_entry_color(VGA_COLOR_GREEN, VGA_COLOR_BLACK), x, drops[x]-1);
+                }
+                // Erase tail further up
+                 if (drops[x] > 5) { // Tail length 5
+                     terminal_putentryat(' ', vga_entry_color(VGA_COLOR_BLACK, VGA_COLOR_BLACK), x, drops[x]-6);
+                }
+                
+                drops[x]++;
+                if (drops[x] >= (int)VGA_HEIGHT + 5) {
+                    drops[x] = -1;
+                }
+            }
+        }
+        
+        // Delay
+        for (volatile int i = 0; i < 500000; i++);
+    }
+    
+    // Restore
+    terminal_initialize();
+    terminal_writestring("Wake up, Neo...\n");
+    terminal_writestring("user@excien:~$ ");
 }
 
 /* --- INITRD / MODULES --- */
@@ -577,14 +681,80 @@ void shell_load_history(int index) {
     }
 }
 
+void shell_handle_input(char scancode) {
+    static int state = 0; // 0=normal, 1=seen E0
+
+    // Handle E0
+    if ((uint8_t)scancode == 0xE0) {
+        state = 1;
+        return;
+    }
+
+    if (state == 1) {
+        // Extended key
+        // Up arrow: 0x48 (if E0 prefix)
+        // Down arrow: 0x50 (if E0 prefix)
+        // Left: 0x4B
+        // Right: 0x4D
+        state = 0;
+
+        if ((uint8_t)scancode == 0x48) { // UP
+            if (history_count > 0) {
+                if (history_view_index == -1) history_view_index = history_count - 1;
+                else if (history_view_index > 0) history_view_index--;
+                shell_load_history(history_view_index);
+            }
+        }
+        else if ((uint8_t)scancode == 0x50) { // DOWN
+             if (history_view_index != -1) {
+                if (history_view_index < history_count - 1) {
+                    history_view_index++;
+                    shell_load_history(history_view_index);
+                } else {
+                    // Restore empty
+                    history_view_index = -1;
+                    while(buffer_index > 0) {
+                        terminal_putchar('\b');
+                        buffer_index--;
+                    }
+                }
+             }
+        }
+        return;
+    }
+
+    // Normal key
+    // Map scancode to ASCII
+    char ascii = 0;
+    if ((uint8_t)scancode < 128) {
+        ascii = kbd_US[(uint8_t)scancode];
+    }
+
+    if (ascii > 0) {
+        if (ascii == '\n') {
+            execute_command();
+        }
+        else if (ascii == '\b') {
+            if (buffer_index > 0) {
+                buffer_index--;
+                terminal_putchar('\b');
+            }
+        }
+        else if (ascii == '\t') {
+            shell_handle_tab();
+        }
+        else {
+            if (buffer_index < 255) {
+                input_buffer[buffer_index++] = ascii;
+                terminal_putchar(ascii);
+            }
+        }
+    }
+}
+
 void shell_loop() 
 {
     terminal_writestring("user@excien:~$ ");
-    
-    // We need to track extended keys.
-    // 0xE0 means extended.
-    
-    int state = 0; // 0=normal, 1=seen E0
     
     while(1) {
         // Polling loop but using our new keyboard_getchar which reads from interrupt buffer
@@ -593,73 +763,7 @@ void shell_loop()
              asm volatile("hlt"); // Save power
              continue;
         }
-        
-        // Handle E0
-        if ((uint8_t)scancode == 0xE0) {
-            state = 1;
-            continue;
-        }
-        
-        if (state == 1) {
-            // Extended key
-            // Up arrow: 0x48 (if E0 prefix)
-            // Down arrow: 0x50 (if E0 prefix)
-            // Left: 0x4B
-            // Right: 0x4D
-            state = 0;
-            
-            if ((uint8_t)scancode == 0x48) { // UP
-                if (history_count > 0) {
-                    if (history_view_index == -1) history_view_index = history_count - 1;
-                    else if (history_view_index > 0) history_view_index--;
-                    shell_load_history(history_view_index);
-                }
-            }
-            else if ((uint8_t)scancode == 0x50) { // DOWN
-                 if (history_view_index != -1) {
-                    if (history_view_index < history_count - 1) {
-                        history_view_index++;
-                        shell_load_history(history_view_index);
-                    } else {
-                        // Restore empty
-                        history_view_index = -1;
-                        while(buffer_index > 0) {
-                            terminal_putchar('\b');
-                            buffer_index--;
-                        }
-                    }
-                 }
-            }
-            continue;
-        }
-        
-        // Normal key
-        // Map scancode to ASCII
-        char ascii = 0;
-        if ((uint8_t)scancode < 128) {
-            ascii = kbd_US[(uint8_t)scancode];
-        }
-        
-        if (ascii > 0) {
-            if (ascii == '\n') {
-                execute_command();
-            }
-            else if (ascii == '\b') {
-                if (buffer_index > 0) {
-                    buffer_index--;
-                    terminal_putchar('\b');
-                }
-            }
-            else if (ascii == '\t') {
-                shell_handle_tab();
-            }
-            else {
-                if (buffer_index < 255) {
-                    input_buffer[buffer_index++] = ascii;
-                    terminal_putchar(ascii);
-                }
-            }
-        }
+        shell_handle_input(scancode);
     }
 }
 

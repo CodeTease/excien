@@ -1,0 +1,80 @@
+# A workflow to build and verify the Excien kernel, it's aint no joke!
+
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  # JOB 1: Heavylifting - Build and verify the kernel binary
+  build-kernel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Toolchain
+        run: |
+          sudo apt-get update
+          # gcc-multilib is required for the -m32 flag in Makefile
+          sudo apt-get install -y build-essential gcc-multilib grub-common
+          # Make sure qemu is available for future use (in this workflow at least)
+          sudo apt-get install -y qemu-system-x86 
+
+      - name: Compile Excien
+        run: make
+
+      # Check Multiboot only if compilation succeeded
+      - name: Check Multiboot Magic
+        run: |
+          if [ -f excien.bin ]; then
+            if grub-file --is-x86-multiboot excien.bin; then
+              echo "Multiboot header valid."
+            else
+              echo "Error: Multiboot header missing!"
+              exit 1
+            fi
+          else
+             echo "Binary not found. Compilation failed?"
+             exit 1
+          fi
+
+      # Check Size only if compilation succeeded
+      - name: Check Floppy Size Limit (1.44MB)
+        run: |
+          if [ -f excien.bin ]; then
+            SIZE=$(stat -c%s "excien.bin")
+            if [ $SIZE -gt 1474560 ]; then
+              echo "Kernel is too fat ($SIZE bytes)! Optimize it."
+              exit 1
+            else
+              echo "Kernel size: $SIZE bytes (Fits in floppy)."
+            fi
+          fi
+
+  # JOB 2: Independent Sanity Check
+  integrity-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Essential Files
+        run: |
+          # Ensure strict adherence to project structure
+          MISSING=0
+          
+          if [ ! -f LICENSE ]; then
+            echo "Error: LICENSE file is missing."
+            MISSING=1
+          else
+            echo "LICENSE check: OK"
+          fi
+
+          if [ ! -f README.md ]; then
+            echo "Error: README.md file is missing."
+            MISSING=1
+          else
+            echo "README check: OK"
+          fi
+
+          if [ $MISSING -eq 1 ]; then
+            exit 1
+          fi
