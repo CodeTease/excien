@@ -15,24 +15,69 @@ void srand(unsigned int seed) {
     next_rand = seed;
 }
 
-/* --- MEMORY MANAGEMENT (Simple Bump Allocator) --- */
-// 10MB mark
-static uint32_t free_mem_addr = 0x1000000; 
+/* --- MEMORY MANAGEMENT (Linked List Allocator) --- */
+typedef struct block_header {
+    size_t size;
+    uint8_t is_free;
+    struct block_header* next;
+} block_header_t;
+
+#define HEAP_START 0x1000000
+#define HEAP_SIZE (10 * 1024 * 1024)
+
+static block_header_t* head = NULL;
 
 void* kmalloc(size_t size) {
-    // 4-byte align
-    if (free_mem_addr & 0x3) { 
-        free_mem_addr &= 0xFFFFFFFC;
-        free_mem_addr += 4;
+    if (size == 0) return NULL;
+
+    // Align size to 4 bytes
+    if (size & 0x3) {
+        size = (size & 0xFFFFFFFC) + 4;
     }
-    void* ptr = (void*)free_mem_addr;
-    free_mem_addr += size;
-    return ptr;
+
+    // Lazy init
+    if (!head) {
+        head = (block_header_t*)HEAP_START;
+        head->size = HEAP_SIZE - sizeof(block_header_t);
+        head->is_free = 1;
+        head->next = NULL;
+    }
+
+    block_header_t* current = head;
+    while (current) {
+        if (current->is_free && current->size >= size) {
+            // Found a fit
+            // Check if we should split
+            if (current->size >= size + sizeof(block_header_t) + 4) {
+                block_header_t* new_block = (block_header_t*)((uint8_t*)current + sizeof(block_header_t) + size);
+                new_block->size = current->size - size - sizeof(block_header_t);
+                new_block->is_free = 1;
+                new_block->next = current->next;
+
+                current->size = size;
+                current->next = new_block;
+            }
+            
+            current->is_free = 0;
+            return (void*)((uint8_t*)current + sizeof(block_header_t));
+        }
+        current = current->next;
+    }
+
+    return NULL; // Out of memory
 }
 
 void kfree(void* ptr) {
-    (void)ptr;
-    // We don't free in bump allocator
+    if (!ptr) return;
+
+    block_header_t* header = (block_header_t*)((uint8_t*)ptr - sizeof(block_header_t));
+    header->is_free = 1;
+
+    // Coalesce with next block if free
+    if (header->next && header->next->is_free) {
+        header->size += sizeof(block_header_t) + header->next->size;
+        header->next = header->next->next;
+    }
 }
 
 void* memcpy(void* dest, const void* src, size_t n) {
@@ -333,6 +378,7 @@ void cmd_ls(const char* args);
 void cmd_cat(const char* args);
 void cmd_color(const char* args);
 void cmd_matrix(const char* args);
+void cmd_meminfo(const char* args);
 
 command_t commands[] = {
     {"echo", cmd_echo, "Prints text to console. Usage: echo <text>"},
@@ -346,6 +392,7 @@ command_t commands[] = {
     {"cat", cmd_cat, "Print module content. Usage: cat <name>"},
     {"color", cmd_color, "Change terminal theme. Usage: color <matrix|bsod|default>"},
     {"matrix", cmd_matrix, "Enter the Matrix."},
+    {"meminfo", cmd_meminfo, "Display memory status (Heap blocks)."},
     {0, 0, 0} 
 };
 
@@ -489,6 +536,31 @@ void cmd_matrix(const char* args) {
     terminal_writestring("user@excien:~$ ");
 }
 
+void cmd_meminfo(const char* args) {
+    (void)args;
+    if (!head) {
+        terminal_writestring("Heap not initialized.\n");
+        return;
+    }
+
+    terminal_writestring("Heap Status:\n");
+    block_header_t* current = head;
+    while (current) {
+        terminal_writestring("  Addr: ");
+        print_hex((uint32_t)current);
+        terminal_writestring(" Size: ");
+        print_hex(current->size);
+        terminal_writestring(" Free: ");
+        if (current->is_free) {
+            terminal_write_color("YES", VGA_COLOR_LIGHT_GREEN);
+        } else {
+            terminal_write_color("NO", VGA_COLOR_LIGHT_RED);
+        }
+        terminal_writestring("\n");
+        current = current->next;
+    }
+}
+
 /* --- INITRD / MODULES --- */
 typedef struct {
     uint32_t mod_start;
@@ -568,13 +640,8 @@ void history_add(const char* cmd) {
         strcpy(history[history_count], cmd);
         history_count++;
     } else {
-        // Shift, but we are using bump allocator so we can't free.
-        // This is a "leak" but per requirements "reset machine to clear".
-        // To be nicer, we could reuse slots, but let's just shift pointers.
-        // Ideally we would recycle the string buffer if size fits, but simple is ok.
-        
-        // Actually, if we just shift pointers, the old string remains in heap (wasted).
-        // Since we don't have free, we just abandon it.
+        // Shift history
+        kfree(history[0]); // Free the oldest
         
         for (int i = 0; i < HISTORY_MAX - 1; i++) {
             history[i] = history[i+1];
